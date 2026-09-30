@@ -1,42 +1,96 @@
-// Arc Testnet chain ID
-export const ARC_TESTNET_CHAIN_ID = 5042002;
+import { robinhoodTestnet, robinhood, anvil } from "viem/chains";
+import type { Chain } from "viem";
+import deployments from "@/deployments/deployments.json";
 
-// USDC on Arc (same address on mainnet and testnet — it's a native predeploy)
-export const USDC_ADDRESS = "0x3600000000000000000000000000000000000000" as const;
-
-// ParityFX contract deployed on Arc Testnet
-export const CONTRACT_ADDRESS = (
-  process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x734f920687253a7057e716af74771a0bfda390de"
-) as `0x${string}`;
-
-// Decimal convention: all on-chain values use 7-decimal fixed-point (1e7 = 1.0)
-// USDC ERC-20 uses 6 decimals. Conversion: 7dec / 10 = 6dec.
-export const INTERNAL_DECIMALS = 1e7;
-export const USDC_DECIMALS     = 6;
-
-// Currency symbol hashes: keccak256(abi.encodePacked("SYMBOL"))
-// Matches how the Solidity contract keys its rates mapping.
-export const CURRENCY_HASHES: Record<string, `0x${string}`> = {
-  USD: "0xc4ae21aac0c6549d71dd96035b7e0bdb6c79ebdba8891b666115bc976d16a29e",
-  MXN: "0xa94b0702860cb929d0ee0c60504dd565775a058bf1d2a2df074c1db0a66ad582",
-  TRY: "0x128d6c262d1afe2351c6e93ceea68e00992708cfcbc0688408b9a23c0c543db2",
+/** Chains the app knows how to talk to. Robinhood Chain testnet is the submission target. */
+export const CHAINS: Record<number, Chain> = {
+  [robinhoodTestnet.id]: robinhoodTestnet,
+  [robinhood.id]: robinhood,
+  [anvil.id]: anvil,
 };
 
-// Pairs shown in the UI
-export const PAIRS = ["MXN/USD", "TRY/USD"] as const;
-export type Pair = (typeof PAIRS)[number];
-export const TENORS = [30, 60, 90, 180, 360] as const;
+export const DEFAULT_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID || robinhoodTestnet.id);
 
-// Protocol parameters (mirror constructor args used during deploy)
-export const MARGIN_PCT      = 500;   // 5% in bps
-export const MAINT_MARGIN_PCT = 250;  // 2.5% in bps
-export const OPEN_FEE_BPS    = 2;     // 0.02% in bps
-export const PARTIAL_LIQ_PCT = 3000;  // 30% in bps
+export interface Deployment {
+  chainId: number;
+  deployer: `0x${string}`;
+  parity: `0x${string}`;
+  usdg: `0x${string}`;
+  priceSource: `0x${string}`;
+  rateSource: `0x${string}`;
+  block: number;
+}
 
-// Legacy threshold constants (kept for UI components)
-export const MARGIN_CALL_THRESHOLD  = 0.5;  // 50% loss triggers margin call
-export const LIQUIDATION_THRESHOLD  = 1.0;  // 100% loss triggers liquidation
+const ENV_DEPLOYMENT: Deployment | null = process.env.NEXT_PUBLIC_PARITY_ADDRESS
+  ? {
+      chainId: DEFAULT_CHAIN_ID,
+      deployer: "0x0000000000000000000000000000000000000000",
+      parity: process.env.NEXT_PUBLIC_PARITY_ADDRESS as `0x${string}`,
+      usdg: (process.env.NEXT_PUBLIC_USDG_ADDRESS || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+      priceSource: (process.env.NEXT_PUBLIC_PRICE_SOURCE || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+      rateSource: (process.env.NEXT_PUBLIC_RATE_SOURCE || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+      block: 0,
+    }
+  : null;
 
-// Arc Testnet RPC & explorer
-export const ARC_TESTNET_RPC      = "https://rpc.testnet.arc.io";
-export const ARC_TESTNET_EXPLORER = "https://explorer.testnet.arc.io";
+/** Deployment record for a chain: env override first, then deployments/<chainId>.json synced from Foundry. */
+export function getDeployment(chainId: number = DEFAULT_CHAIN_ID): Deployment | null {
+  if (ENV_DEPLOYMENT && ENV_DEPLOYMENT.chainId === chainId) return ENV_DEPLOYMENT;
+  const d = (deployments as Record<string, Deployment>)[String(chainId)];
+  return d ?? null;
+}
+
+export function explorerUrl(chainId: number): string {
+  return CHAINS[chainId]?.blockExplorers?.default.url ?? "";
+}
+
+export function rpcUrl(chainId: number): string {
+  if (chainId === robinhoodTestnet.id) return process.env.NEXT_PUBLIC_ROBINHOOD_TESTNET_RPC || "https://rpc.testnet.chain.robinhood.com/rpc";
+  return CHAINS[chainId]?.rpcUrls.default.http[0] ?? "";
+}
+
+// ── Market configuration ──────────────────────────────────────────────────
+
+export interface PairDef {
+  /** Display id, e.g. "TSLA/USD" */
+  id: string;
+  base: string;
+  quote: string;
+  /** Margin token is the quote currency (stock corridors) or the base (fiat corridors with USD margin). */
+  marginInQuote: boolean;
+  kind: "stock" | "fx";
+  /** Human unit for the notional. */
+  unit: string;
+  description: string;
+}
+
+export const PAIRS: PairDef[] = [
+  { id: "TSLA/USD", base: "TSLA", quote: "USD", marginInQuote: true, kind: "stock", unit: "TSLA", description: "Tesla Stock Token" },
+  { id: "AMZN/USD", base: "AMZN", quote: "USD", marginInQuote: true, kind: "stock", unit: "AMZN", description: "Amazon Stock Token" },
+  { id: "NFLX/USD", base: "NFLX", quote: "USD", marginInQuote: true, kind: "stock", unit: "NFLX", description: "Netflix Stock Token" },
+  { id: "PLTR/USD", base: "PLTR", quote: "USD", marginInQuote: true, kind: "stock", unit: "PLTR", description: "Palantir Stock Token" },
+  { id: "AMD/USD", base: "AMD", quote: "USD", marginInQuote: true, kind: "stock", unit: "AMD", description: "AMD Stock Token" },
+  { id: "USD/MXN", base: "USD", quote: "MXN", marginInQuote: false, kind: "fx", unit: "USD", description: "Peso corridor from the Stellar original" },
+];
+
+export const STOCK_PAIRS = PAIRS.filter((p) => p.kind === "stock");
+export const DEFAULT_PAIR = PAIRS[0];
+export const TENORS = [7, 30, 60, 90, 180] as const;
+export const RATE_SYMBOLS = ["USD", "MXN"] as const;
+
+export function findPair(base: string, quote: string): PairDef | undefined {
+  return PAIRS.find((p) => p.base === base && p.quote === quote);
+}
+
+/** Protocol parameters as deployed (mirrors Parity.Params in script/Deploy.s.sol). */
+export const PARAMS = {
+  marginBps: 500,      // 5% initial margin
+  callBps: 250,        // margin call at a 2.5% loss (half the initial margin)
+  liqBps: 375,         // liquidatable at a 3.75% loss (75% of the initial margin)
+  openFeeBps: 2,
+  partialLiqBps: 3000, // first breach closes 30%
+  liqPenaltyBps: 100,
+};
+
+export const INTERNAL_DECIMALS = 1e7;
+export const USDG_DECIMALS = 6;

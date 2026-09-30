@@ -1,259 +1,299 @@
 "use client";
 /**
- * EVM contract interaction helpers for ParityFX on Arc Testnet.
- * All on-chain values use 7-decimal fixed-point (DECIMALS = 1e7).
- * USDC margin amounts are in 7-decimal units; convert to 6-decimal USDC
- * by dividing by 10 (1e7 / 10 = 1e6).
+ * Read-side helpers for Parity. All on-chain values are 7-decimal fixed point (1e7 = 1.0);
+ * these helpers convert to plain numbers for the UI. Writes live in hooks.ts.
  */
+import { createPublicClient, http, type PublicClient } from "viem";
+import { parityAbi } from "@/abi/parity";
+import { erc20Abi } from "@/abi/erc20";
+import { CHAINS, DEFAULT_CHAIN_ID, getDeployment, rpcUrl, findPair, type PairDef } from "./constants";
+import { fromD, fromBytes32, toBytes32 } from "./format";
 
-import { createPublicClient, http } from "viem";
-import { arcTestnet } from "viem/chains";
-import { CONTRACT_ADDRESS, ARC_TESTNET_RPC, CURRENCY_HASHES, INTERNAL_DECIMALS } from "./constants";
+const clients: Record<number, PublicClient> = {};
 
-// ─── RPC client (read-only) ─────────────────────────────────────────────────
-
-const client = createPublicClient({
-  chain: arcTestnet,
-  transport: http(ARC_TESTNET_RPC),
-});
-
-// ─── Minimal ABI for read calls (JSON ABI format — no parseAbi tuple syntax) ─
-
-const PARITY_ABI = [
-  {
-    name: "getSpot",
-    type: "function",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "int256" }],
-  },
-  {
-    name: "getRate",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "currency", type: "bytes32" }],
-    outputs: [{ name: "", type: "int256" }],
-  },
-  {
-    name: "getInsuranceBalance",
-    type: "function",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "int256" }],
-  },
-  {
-    name: "getPosition",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "positionId", type: "uint256" }],
-    outputs: [
-      {
-        name: "",
-        type: "tuple",
-        components: [
-          { name: "id", type: "uint256" },
-          { name: "hedger", type: "address" },
-          { name: "maker", type: "address" },
-          { name: "pairBase", type: "bytes32" },
-          { name: "pairQuote", type: "bytes32" },
-          { name: "direction", type: "uint8" },
-          { name: "notional", type: "int256" },
-          { name: "lockedForward", type: "int256" },
-          { name: "tenorDays", type: "uint32" },
-          { name: "openTime", type: "uint64" },
-          { name: "maturityTime", type: "uint64" },
-          { name: "hedgerMargin", type: "int256" },
-          { name: "makerMargin", type: "int256" },
-          { name: "hedgerState", type: "uint8" },
-          { name: "makerState", type: "uint8" },
-          { name: "status", type: "uint8" },
-          { name: "lastMarkValue", type: "int256" },
-          { name: "lastMarkTime", type: "uint64" },
-        ],
-      },
-    ],
-  },
-  {
-    name: "getRequest",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "requestId", type: "uint256" }],
-    outputs: [
-      {
-        name: "",
-        type: "tuple",
-        components: [
-          { name: "id", type: "uint256" },
-          { name: "hedger", type: "address" },
-          { name: "pairBase", type: "bytes32" },
-          { name: "pairQuote", type: "bytes32" },
-          { name: "direction", type: "uint8" },
-          { name: "notional", type: "int256" },
-          { name: "tenorDays", type: "uint32" },
-          { name: "parityForward", type: "int256" },
-          { name: "createdAt", type: "uint64" },
-          { name: "quoteCount", type: "uint64" },
-          { name: "status", type: "uint8" },
-        ],
-      },
-    ],
-  },
-  {
-    name: "getOpenRequests",
-    type: "function",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "uint256[]" }],
-  },
-] as const;
-
-// ─── Pure forward computation (CIP formula, no RPC needed) ──────────────────
-// All values in human-decimal (e.g. spot = 20.0, rate = 0.10)
-// Returns human-decimal forward price.
-
-export function computeForward(
-  spot: number,
-  rateBase: number,
-  rateQuote: number,
-  tenorDays: number
-): number {
-  const t = tenorDays / 360;
-  return spot * (1 + rateQuote * t) / (1 + rateBase * t);
+export function getClient(chainId: number = DEFAULT_CHAIN_ID): PublicClient {
+  if (!clients[chainId]) {
+    clients[chainId] = createPublicClient({ chain: CHAINS[chainId], transport: http(rpcUrl(chainId)) });
+  }
+  return clients[chainId];
 }
 
-// ─── On-chain view helpers ───────────────────────────────────────────────────
+export type Direction = "SellBase" | "BuyBase";
+export const DIRECTION_INDEX: Record<Direction, number> = { SellBase: 0, BuyBase: 1 };
+export type SideState = "Safe" | "Called" | "Breached";
+const SIDE_STATES: SideState[] = ["Safe", "Called", "Breached"];
+export type PositionStatus = "Active" | "Settled" | "Liquidated";
+const POSITION_STATUSES: PositionStatus[] = ["Active", "Settled", "Liquidated"];
+export type RequestStatus = "Open" | "Filled" | "Cancelled";
+const REQUEST_STATUSES: RequestStatus[] = ["Open", "Filled", "Cancelled"];
+export type QuoteStatus = "Live" | "Cancelled" | "Accepted";
+const QUOTE_STATUSES: QuoteStatus[] = ["Live", "Cancelled", "Accepted"];
 
-async function readContract<T>(
-  functionName: string,
-  args: unknown[] = []
-): Promise<T | null> {
-  if (!CONTRACT_ADDRESS) return null;
+export interface Quote {
+  id: number;
+  requestId: number;
+  maker: `0x${string}`;
+  spreadBps: number;
+  lockedForward: number;
+  expiry: number;
+  status: QuoteStatus;
+}
+
+export interface Request {
+  id: number;
+  hedger: `0x${string}`;
+  base: string;
+  quote: string;
+  pair: PairDef | undefined;
+  direction: Direction;
+  notional: number;
+  tenorDays: number;
+  parityForward: number;
+  initialMargin: number;
+  status: RequestStatus;
+  createdAt: number;
+  quotes: Quote[];
+}
+
+export interface Position {
+  id: number;
+  hedger: `0x${string}`;
+  maker: `0x${string}`;
+  base: string;
+  quote: string;
+  pair: PairDef | undefined;
+  direction: Direction;
+  notional: number;
+  notionalValue: number;
+  lockedForward: number;
+  tenorDays: number;
+  openTime: number;
+  maturityTime: number;
+  initialMargin: number;
+  callThreshold: number;
+  liqThreshold: number;
+  hedgerMargin: number;
+  makerMargin: number;
+  hedgerState: SideState;
+  makerState: SideState;
+  hedgerPartialDone: boolean;
+  makerPartialDone: boolean;
+  status: PositionStatus;
+  lastMarkValue: number;
+  lastMarkTime: number;
+  /** Live mark from previewMark (hedger's perspective), if it could be read. */
+  markValue: number | null;
+  currentForward: number | null;
+  spot: number | null;
+}
+
+export interface ForwardPreview {
+  forward: number;
+  spot: number;
+  rateBase: number;
+  rateQuote: number;
+}
+
+function contractOf(chainId: number) {
+  const d = getDeployment(chainId);
+  if (!d) throw new Error(`no Parity deployment for chain ${chainId}`);
+  return { address: d.parity, abi: parityAbi } as const;
+}
+
+export async function previewForward(base: string, quote: string, tenorDays: number, chainId = DEFAULT_CHAIN_ID): Promise<ForwardPreview | null> {
   try {
-    const result = await client.readContract({
-      address: CONTRACT_ADDRESS,
-      abi: PARITY_ABI,
-      functionName: functionName as Parameters<typeof client.readContract>[0]["functionName"],
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      args: args as any,
+    const [forward, spot, rateBase, rateQuote] = await getClient(chainId).readContract({
+      ...contractOf(chainId),
+      functionName: "previewForward",
+      args: [toBytes32(base), toBytes32(quote), tenorDays],
     });
-    return result as T;
+    return { forward: fromD(forward), spot: fromD(spot), rateBase: fromD(rateBase), rateQuote: fromD(rateQuote) };
   } catch (err) {
-    console.error(`readContract ${functionName} failed:`, err);
+    console.warn("previewForward failed", base, quote, err);
     return null;
   }
 }
 
-/** Returns spot price as a human decimal (e.g. 20.0 for MXN/USD). */
-export async function getSpot(): Promise<number | null> {
-  const raw = await readContract<bigint>("getSpot");
-  if (raw === null) return null;
-  return Number(raw) / INTERNAL_DECIMALS;
+export async function getInsuranceBalance(chainId = DEFAULT_CHAIN_ID): Promise<number | null> {
+  try {
+    const v = await getClient(chainId).readContract({ ...contractOf(chainId), functionName: "insuranceBalance" });
+    return fromD(v);
+  } catch {
+    return null;
+  }
 }
 
-/** Returns the governance rate for a currency symbol (e.g. "MXN") as a decimal (e.g. 0.10). */
-export async function getRate(currency: string): Promise<number | null> {
-  const hash = CURRENCY_HASHES[currency];
-  if (!hash) return null;
-  const raw = await readContract<bigint>("getRate", [hash]);
-  if (raw === null) return null;
-  return Number(raw) / INTERNAL_DECIMALS;
+export async function getCurrentTime(chainId = DEFAULT_CHAIN_ID): Promise<number | null> {
+  try {
+    const v = await getClient(chainId).readContract({ ...contractOf(chainId), functionName: "currentTime" });
+    return Number(v);
+  } catch {
+    return null;
+  }
 }
 
-/** Returns the insurance fund balance in USDC (6 decimals). */
-export async function getInsuranceBalance(): Promise<number | null> {
-  const raw = await readContract<bigint>("getInsuranceBalance");
-  if (raw === null) return null;
-  // Contract stores in 7-decimal USDC-equiv; convert to human USDC
-  return Number(raw) / INTERNAL_DECIMALS;
+export async function getOpenAccess(chainId = DEFAULT_CHAIN_ID): Promise<boolean> {
+  try {
+    return await getClient(chainId).readContract({ ...contractOf(chainId), functionName: "openAccess" });
+  } catch {
+    return false;
+  }
 }
 
-/** Returns raw position data for a given position ID, or null if not found. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function getPosition(positionId: number): Promise<any | null> {
-  return readContract("getPosition", [BigInt(positionId)]);
+export async function isEligible(account: `0x${string}`, chainId = DEFAULT_CHAIN_ID): Promise<boolean> {
+  try {
+    const [open, elig] = await Promise.all([
+      getClient(chainId).readContract({ ...contractOf(chainId), functionName: "openAccess" }),
+      getClient(chainId).readContract({ ...contractOf(chainId), functionName: "eligible", args: [account] }),
+    ]);
+    return open || elig;
+  } catch {
+    return false;
+  }
 }
 
-/** Returns raw request data for a given request ID, or null if not found. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function getRequest(requestId: number): Promise<any | null> {
-  return readContract("getRequest", [BigInt(requestId)]);
+export async function getOwner(chainId = DEFAULT_CHAIN_ID): Promise<`0x${string}` | null> {
+  try {
+    return await getClient(chainId).readContract({ ...contractOf(chainId), functionName: "owner" });
+  } catch {
+    return null;
+  }
 }
 
-/** Returns the list of open request IDs. */
-export async function getOpenRequests(): Promise<number[] | null> {
-  const result = await readContract<bigint[]>("getOpenRequests");
-  if (result === null) return null;
-  return result.map(Number);
+export async function getUsdgBalance(account: `0x${string}`, chainId = DEFAULT_CHAIN_ID): Promise<number | null> {
+  const d = getDeployment(chainId);
+  if (!d) return null;
+  try {
+    const v = await getClient(chainId).readContract({ address: d.usdg, abi: erc20Abi, functionName: "balanceOf", args: [account] });
+    return Number(v) / 1e6;
+  } catch {
+    return null;
+  }
 }
 
-// ─── Write function stubs ────────────────────────────────────────────────────
-// These are called from AdminPanel; full implementation requires the connected
-// wallet to sign transactions (wagmi useWriteContract). The stubs show an alert
-// until the contract is deployed and wallet write wiring is complete.
-
-export async function setSpotPrice(_admin: string, _price: number): Promise<boolean> {
-  alert("Admin write functions require wallet signing — deploy the contract first.");
-  return false;
+export async function getRequest(id: number, chainId = DEFAULT_CHAIN_ID): Promise<Request | null> {
+  try {
+    const client = getClient(chainId);
+    const [r, qs] = await Promise.all([
+      client.readContract({ ...contractOf(chainId), functionName: "getRequest", args: [BigInt(id)] }),
+      client.readContract({ ...contractOf(chainId), functionName: "getQuotes", args: [BigInt(id)] }),
+    ]);
+    const base = fromBytes32(r.base);
+    const quote = fromBytes32(r.quote);
+    return {
+      id: Number(r.id),
+      hedger: r.hedger,
+      base,
+      quote,
+      pair: findPair(base, quote),
+      direction: r.direction === 0 ? "SellBase" : "BuyBase",
+      notional: fromD(r.notional),
+      tenorDays: Number(r.tenorDays),
+      parityForward: fromD(r.parityForward),
+      initialMargin: fromD(r.initialMargin),
+      status: REQUEST_STATUSES[r.status] ?? "Open",
+      createdAt: Number(r.createdAt),
+      quotes: qs.map((q) => ({
+        id: Number(q.id),
+        requestId: Number(q.requestId),
+        maker: q.maker,
+        spreadBps: Number(q.spreadBps),
+        lockedForward: fromD(q.lockedForward),
+        expiry: Number(q.expiry),
+        status: QUOTE_STATUSES[q.status] ?? "Live",
+      })),
+    };
+  } catch (err) {
+    console.warn("getRequest failed", id, err);
+    return null;
+  }
 }
 
-export async function setRate(_admin: string, _currency: string, _rate: number): Promise<boolean> {
-  alert("Admin write functions require wallet signing — deploy the contract first.");
-  return false;
+export async function getOpenRequests(chainId = DEFAULT_CHAIN_ID): Promise<Request[]> {
+  try {
+    const ids = await getClient(chainId).readContract({ ...contractOf(chainId), functionName: "getOpenRequestIds" });
+    const reqs = await Promise.all(ids.map((i) => getRequest(Number(i), chainId)));
+    return reqs.filter((r): r is Request => r !== null).sort((a, b) => b.id - a.id);
+  } catch {
+    return [];
+  }
 }
 
-export async function setTime(_admin: string, _timestamp: number): Promise<boolean> {
-  alert("Admin write functions require wallet signing — deploy the contract first.");
-  return false;
+export async function getPosition(id: number, chainId = DEFAULT_CHAIN_ID): Promise<Position | null> {
+  try {
+    const client = getClient(chainId);
+    const p = await client.readContract({ ...contractOf(chainId), functionName: "getPosition", args: [BigInt(id)] });
+    if (p.hedger === "0x0000000000000000000000000000000000000000") return null;
+    const base = fromBytes32(p.base);
+    const quote = fromBytes32(p.quote);
+    let markValue: number | null = null;
+    let currentForward: number | null = null;
+    let spot: number | null = null;
+    if (p.status === 0) {
+      try {
+        const [v, f, s] = await client.readContract({ ...contractOf(chainId), functionName: "previewMark", args: [BigInt(id)] });
+        markValue = fromD(v);
+        currentForward = fromD(f);
+        spot = fromD(s);
+      } catch {
+        /* price unavailable: leave the stored mark */
+      }
+    }
+    return {
+      id: Number(p.id),
+      hedger: p.hedger,
+      maker: p.maker,
+      base,
+      quote,
+      pair: findPair(base, quote),
+      direction: p.direction === 0 ? "SellBase" : "BuyBase",
+      notional: fromD(p.notional),
+      notionalValue: fromD(p.notionalValue),
+      lockedForward: fromD(p.lockedForward),
+      tenorDays: Number(p.tenorDays),
+      openTime: Number(p.openTime),
+      maturityTime: Number(p.maturityTime),
+      initialMargin: fromD(p.initialMargin),
+      callThreshold: fromD(p.callThreshold),
+      liqThreshold: fromD(p.liqThreshold),
+      hedgerMargin: fromD(p.hedgerMargin),
+      makerMargin: fromD(p.makerMargin),
+      hedgerState: SIDE_STATES[p.hedgerState] ?? "Safe",
+      makerState: SIDE_STATES[p.makerState] ?? "Safe",
+      hedgerPartialDone: p.hedgerPartialDone,
+      makerPartialDone: p.makerPartialDone,
+      status: POSITION_STATUSES[p.status] ?? "Active",
+      lastMarkValue: fromD(p.lastMarkValue),
+      lastMarkTime: Number(p.lastMarkTime),
+      markValue,
+      currentForward,
+      spot,
+    };
+  } catch (err) {
+    console.warn("getPosition failed", id, err);
+    return null;
+  }
 }
 
-export async function addEligible(_admin: string, _account: string): Promise<boolean> {
-  alert("Admin write functions require wallet signing — deploy the contract first.");
-  return false;
+export async function getAllPositions(chainId = DEFAULT_CHAIN_ID): Promise<Position[]> {
+  try {
+    const n = Number(await getClient(chainId).readContract({ ...contractOf(chainId), functionName: "nextPositionId" }));
+    const ids = Array.from({ length: n }, (_, i) => n - 1 - i);
+    const ps = await Promise.all(ids.map((i) => getPosition(i, chainId)));
+    return ps.filter((p): p is Position => p !== null);
+  } catch {
+    return [];
+  }
 }
 
-// ── Position action stubs (require wagmi useWriteContract) ───────────────────
-// Full implementation needs the connected wallet to sign; stubs for now.
-
-export async function markPosition(_positionId: number): Promise<boolean> {
-  alert("markPosition: connect wallet and use the Positions page to mark on-chain.");
-  return false;
+/** Pure forward, same formula as the contract, for instant UI feedback between chain refreshes. */
+export function computeForward(spot: number, rateBase: number, rateQuote: number, tenorDays: number): number {
+  const t = tenorDays / 360;
+  return (spot * (1 + rateQuote * t)) / (1 + rateBase * t);
 }
 
-export async function topUpMargin(_caller: string, _positionId: number, _amount: number): Promise<boolean> {
-  alert("topUpMargin: connect wallet and approve USDC first.");
-  return false;
-}
-
-export async function liquidate(_positionId: number): Promise<boolean> {
-  alert("liquidate: connect wallet. Anyone can liquidate a breached position.");
-  return false;
-}
-
-export async function settle(_positionId: number): Promise<boolean> {
-  alert("settle: connect wallet. Position must be at or past maturity.");
-  return false;
-}
-
-export async function postRequest(
-  _hedger: string, _pairBase: string, _pairQuote: string,
-  _direction: string, _notional: number, _tenorDays: number, _marginToken: string,
-): Promise<boolean> {
-  alert("postRequest: connect wallet. Your address must be on the eligibility allowlist.");
-  return false;
-}
-
-export async function submitQuote(
-  _maker: string, _requestId: number, _spreadBps: number, _expiry: number,
-): Promise<boolean> {
-  alert("submitQuote: connect wallet. Maker margin is reserved at submission.");
-  return false;
-}
-
-export async function cancelQuote(_maker: string, _requestId: number, _quoteId: number): Promise<void> {
-  alert("cancelQuote: connect wallet. Only the maker can cancel their own live quote.");
-}
-
-export async function acceptQuote(_hedger: string, _requestId: number, _quoteId: number): Promise<boolean> {
-  alert("acceptQuote: connect wallet. Approve USDC first — hedger margin + open fee are taken here.");
-  return false;
+/** Position value from the hedger's perspective, in margin units. Mirrors Parity.valuePosition. */
+export function valuePosition(locked: number, current: number, notional: number, spot: number, direction: Direction, marginInQuote: boolean): number {
+  const diff = direction === "SellBase" ? locked - current : current - locked;
+  return marginInQuote ? diff * notional : (diff * notional) / spot;
 }
