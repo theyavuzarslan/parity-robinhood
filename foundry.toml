@@ -1,12 +1,20 @@
 [profile.default]
 src = "contracts"
-out = "contracts/out"
+out = "out"
 libs = ["lib"]
-evm_version = "paris"
+test = "test"
+script = "script"
 solc_version = "0.8.28"
-via_ir = true
+evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
-remappings = [
-    "@openzeppelin/contracts/=/home/user/.bun/install/cache/@openzeppelin/contracts@5.1.0@@@1/",
-]
+via_ir = true
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
+
+[rpc_endpoints]
+robinhood_testnet = "${ROBINHOOD_TESTNET_RPC}"
+robinhood = "${ROBINHOOD_RPC}"
+arbitrum_sepolia = "${ARBITRUM_SEPOLIA_RPC}"
+
+[lint]
+exclude_lints = ["unsafe-typecast", "mixed-case-variable", "mixed-case-function", "screaming-snake-case-immutable"]

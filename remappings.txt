@@ -1,1 +1,1 @@
-@openzeppelin/contracts/=/home/user/.bun/install/cache/@openzeppelin/contracts@5.1.0@@@1/
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
