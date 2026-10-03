@@ -13,3 +13,7 @@ frontend/node_modules/
 .env
 .env.local
 frontend/.env.local
+
+# Vercel
+.vercel
+frontend/.vercel

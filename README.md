@@ -2,6 +2,8 @@
 
 A two-sided, margined forward market on Robinhood Chain. The forward price is computed on-chain from interest-rate parity instead of quoted by a dealer, positions open through request for quote (RFQ), and the contract handles margin calls, liquidation, bad debt and cash settlement.
 
+**Live demo: https://parity-robinhood.vercel.app** (Robinhood Chain testnet)
+
 Built for **Arbitrum Open House Singapore** (Robinhood Chain). Forked from Parity, our Stellar FX-forward market ([nurkardelens/parity-stellar](https://github.com/nurkardelens/parity-stellar)), and rebuilt for EVM.
 
 ## Why it works on Robinhood Chain

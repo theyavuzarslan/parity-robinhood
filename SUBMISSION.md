@@ -10,6 +10,8 @@
 
 **Repo:** https://github.com/theyavuzarslan/parity-robinhood
 
+**Live demo:** https://parity-robinhood.vercel.app
+
 ## Description
 
 Stock Tokens trade 24/7 on Robinhood Chain, but nothing on-chain lets you lock a future price for them. Perps have no maturity and a funding rate that moves every hour. Parity is a two-sided, margined forward market for Stock Tokens.
