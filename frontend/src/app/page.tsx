@@ -1,390 +1,209 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useAccount } from "wagmi";
-import { Activity, TrendingUp, Shield, Clock, Loader2, ExternalLink, RefreshCw } from "lucide-react";
-import ForwardDisplay from "@/components/ForwardDisplay";
-import RequestForm from "@/components/RequestForm";
-import QuoteList from "@/components/QuoteList";
-import { MOCK_REQUESTS } from "@/lib/mock";
-import { formatPrice } from "@/lib/format";
-import { getSpot, getRate, computeForward, getInsuranceBalance } from "@/lib/contract";
-import { CONTRACT_ADDRESS, ARC_TESTNET_EXPLORER, PAIRS, TENORS } from "@/lib/constants";
-import type { Pair } from "@/lib/constants";
+import { TrendingUp, Shield, Clock, Coins, ExternalLink } from "lucide-react";
+import { PAIRS, TENORS, DEFAULT_PAIR, PARAMS, type PairDef } from "@/lib/constants";
+import { previewForward, getOpenRequests, getInsuranceBalance, getUsdgBalance, getCurrentTime, DIRECTION_INDEX, type Direction, type Request } from "@/lib/contract";
+import { useTx, usePoll, useDeployment } from "@/lib/hooks";
+import { formatPrice, formatUSD, formatPct, toBytes32, toD, toUsdg, truncateAddress } from "@/lib/format";
+import { Card, Label, Chip, Button, NumberInput } from "@/components/ui";
+import TxStatus from "@/components/TxStatus";
+import RequestRow from "@/components/RequestRow";
 
-/* ── Lerped number hook ─────────────────────────────────────────────────── */
-function useLerped(target: number | null, speed = 0.14) {
-  const [display, setDisplay] = useState(target ?? 0);
-  const ref = useRef(target ?? 0);
-  useEffect(() => {
-    if (target == null) return;
-    let raf = 0;
-    const tick = () => {
-      ref.current += (target - ref.current) * speed;
-      if (Math.abs(target - ref.current) < 0.0001) ref.current = target;
-      setDisplay(ref.current);
-      if (ref.current !== target) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [target, speed]);
-  return display;
+function Stat({ label, value, sub, icon: Icon }: { label: string; value: string; sub?: string; icon: React.ElementType }) {
+  return (
+    <Card className="p-4">
+      <div className="flex items-center gap-2 mb-2">
+        <Icon style={{ width: 13, height: 13, color: "var(--accent)" }} />
+        <Label>{label}</Label>
+      </div>
+      <div className="display text-2xl font-bold tabular-nums" style={{ color: "var(--ink)" }}>{value}</div>
+      {sub && <div className="text-xs mt-0.5" style={{ color: "var(--subtle)" }}>{sub}</div>}
+    </Card>
+  );
 }
 
-/* ── Stat card ─────────────────────────────────────────────────────────── */
-function StatCard({
-  label,
-  value,
-  sub,
-  icon: Icon,
-  color = "var(--accent)",
-  live,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  icon: React.ElementType;
-  color?: string;
-  live?: boolean;
-}) {
+export default function MarketPage() {
+  const { address } = useAccount();
+  const d = useDeployment();
+  const [pair, setPair] = useState<PairDef>(DEFAULT_PAIR);
+  const [tenor, setTenor] = useState<number>(90);
+  const [direction, setDirection] = useState<Direction>("SellBase");
+  const [notional, setNotional] = useState("1000");
+
+  const { data: fwd, refresh: refreshFwd } = usePoll(() => previewForward(pair.base, pair.quote, tenor), 15_000, [pair.id, tenor]);
+  const { data: matrix } = usePoll(
+    async () => {
+      const rows = await Promise.all(PAIRS.map(async (p) => [p.id, await previewForward(p.base, p.quote, 90)] as const));
+      return Object.fromEntries(rows);
+    },
+    30_000,
+    []
+  );
+  const { data: requests, refresh: refreshReqs } = usePoll(() => getOpenRequests(), 10_000, []);
+  const { data: insurance, refresh: refreshIns } = usePoll(() => getInsuranceBalance(), 15_000, []);
+  const { data: balance, refresh: refreshBal } = usePoll(async () => (address ? getUsdgBalance(address) : null), 15_000, [address]);
+  const { data: chainNow } = usePoll(() => getCurrentTime(), 15_000, []);
+
+  const refreshAll = useCallback(() => {
+    refreshReqs();
+    refreshIns();
+    refreshBal();
+    refreshFwd();
+  }, [refreshReqs, refreshIns, refreshBal, refreshFwd]);
+  const tx = useTx(refreshAll);
+
+  const n = parseFloat(notional || "0");
+  const notionalValue = fwd ? (pair.marginInQuote ? n * fwd.spot : n) : 0;
+  const margin = (notionalValue * PARAMS.marginBps) / 10_000;
+  const fee = (notionalValue * PARAMS.openFeeBps) / 10_000;
+  const points = fwd ? fwd.forward - fwd.spot : 0;
+
+  const myRequests = useMemo(() => (requests ?? []).filter((r) => address && r.hedger.toLowerCase() === address.toLowerCase()), [requests, address]);
+  const otherRequests = useMemo(() => (requests ?? []).filter((r) => !address || r.hedger.toLowerCase() !== address.toLowerCase()), [requests, address]);
+
+  const post = () =>
+    tx.parity &&
+    tx.send("Post request", {
+      ...tx.parity,
+      functionName: "postRequest",
+      args: [toBytes32(pair.base), toBytes32(pair.quote), DIRECTION_INDEX[direction], toD(n), tenor],
+    });
+
+  const accept = (r: Request, quoteId: number) =>
+    tx.parity &&
+    tx.send("Accept quote", { ...tx.parity, functionName: "acceptQuote", args: [BigInt(r.id), BigInt(quoteId)] }, toUsdg(r.initialMargin * 1.01));
+
+  const mint = () => tx.usdg && address && tx.send("Mint 100,000 test USDG", { ...tx.usdg, functionName: "mint", args: [address, toUsdg(100_000)] });
+
+  if (!d) {
+    return <Card>No Parity deployment found for this chain. Run scripts/deploy-testnet.sh and scripts/sync-frontend.sh.</Card>;
+  }
+
   return (
-    <div
-      className="rounded-2xl p-4"
-      style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
-    >
-      <div className="flex items-center gap-2 mb-2">
-        <div
-          className="w-6 h-6 rounded-md flex items-center justify-center"
-          style={{ background: `${color}18` }}
-        >
-          <Icon style={{ width: 13, height: 13, color }} />
+    <div className="space-y-6">
+      <div>
+        <h1 className="display text-3xl font-bold" style={{ color: "var(--ink)" }}>Forwards on Robinhood Stock Tokens</h1>
+        <p className="text-sm mt-1 max-w-3xl" style={{ color: "var(--muted)" }}>
+          The forward price is computed on-chain from interest-rate parity, not quoted by a dealer. Stock Tokens reinvest dividends
+          into the token, so the forward is spot plus the cost of carry: <span className="mono">F = S × (1 + r_USD × t/360)</span>. Makers compete only on the spread over it.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Stat label={`${pair.id} spot`} value={fwd ? formatPrice(fwd.spot, 2) : "…"} sub="price source" icon={TrendingUp} />
+        <Stat label={`${tenor}D forward`} value={fwd ? formatPrice(fwd.forward, 4) : "…"} sub={fwd ? `points ${points >= 0 ? "+" : ""}${formatPrice(points, 4)}` : ""} icon={TrendingUp} />
+        <Stat label="Insurance fund" value={insurance !== null && insurance !== undefined ? formatUSD(insurance) : "…"} sub="USDG, on-chain" icon={Shield} />
+        <Stat label="Chain clock" value={chainNow ? new Date(chainNow * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "…"} sub="demo clock if set" icon={Clock} />
+      </div>
+
+      <div className="grid lg:grid-cols-12 gap-5">
+        <div className="lg:col-span-5 space-y-5">
+          <Card className="space-y-4">
+            <Label>Post a request for quote</Label>
+            <div className="flex flex-wrap gap-1.5">
+              {PAIRS.map((p) => (
+                <Chip key={p.id} active={pair.id === p.id} onClick={() => setPair(p)}>{p.id}</Chip>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Chip mono={false} active={direction === "SellBase"} onClick={() => setDirection("SellBase")}>Sell {pair.base} forward</Chip>
+              <Chip mono={false} active={direction === "BuyBase"} onClick={() => setDirection("BuyBase")}>Buy {pair.base} forward</Chip>
+            </div>
+            <div>
+              <span className="text-xs block mb-1.5" style={{ color: "var(--subtle)" }}>Notional</span>
+              <NumberInput value={notional} onChange={setNotional} suffix={pair.unit} />
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {TENORS.map((t) => (
+                <Chip key={t} active={tenor === t} onClick={() => setTenor(t)}>{t}D</Chip>
+              ))}
+            </div>
+            {fwd && (
+              <div className="rounded-xl px-3 py-2.5 space-y-1 text-xs" style={{ background: "var(--surface-muted)", border: "1px solid var(--border)" }}>
+                <Row k="Parity forward" v={formatPrice(fwd.forward, 4)} />
+                <Row k={`r(${pair.base}) / r(${pair.quote})`} v={`${formatPct(fwd.rateBase)} / ${formatPct(fwd.rateQuote)}`} />
+                <Row k="Notional value" v={formatUSD(notionalValue)} />
+                <Row k="Initial margin, each side (5%)" v={formatUSD(margin)} />
+                <Row k="Open fee to insurance (2 bps)" v={formatUSD(fee)} />
+              </div>
+            )}
+            <Button onClick={post} disabled={!address || !(n > 0) || tx.state.status === "pending"} className="w-full py-3 text-sm">
+              {address ? "Post request" : "Connect wallet"}
+            </Button>
+            <TxStatus state={tx.state} explorer={tx.explorer} />
+          </Card>
+
+          <Card className="space-y-3">
+            <div className="flex items-center gap-2"><Coins style={{ width: 13, height: 13, color: "var(--accent)" }} /><Label>Testnet margin</Label></div>
+            <p className="text-xs" style={{ color: "var(--subtle)" }}>
+              Margin is posted in USDG. On testnet it is a mintable stand-in, so anyone can fund a demo wallet. Gas is testnet ETH from faucet.testnet.chain.robinhood.com.
+            </p>
+            <div className="flex items-center justify-between">
+              <span className="mono text-sm" style={{ color: "var(--ink)" }}>{balance !== null && balance !== undefined ? formatUSD(balance) : "—"} USDG</span>
+              <Button tone="ghost" onClick={mint} disabled={!address}>Mint 100,000</Button>
+            </div>
+          </Card>
         </div>
-        <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--subtle)" }}>
-          {label}
-        </span>
-        {live && (
-          <span className="live-dot ml-auto w-1.5 h-1.5 rounded-full" style={{ background: "var(--success)" }} />
-        )}
+
+        <div className="lg:col-span-7 space-y-5">
+          <Card>
+            <Label>Your open requests</Label>
+            <div className="mt-3 space-y-3">
+              {myRequests.length === 0 && <p className="text-xs" style={{ color: "var(--subtle)" }}>None. Post one, then quote it from the Maker page (a second wallet, or the same one for the demo).</p>}
+              {myRequests.map((r) => (
+                <RequestRow key={r.id} r={r} now={chainNow ?? 0} onAccept={(q) => accept(r, q)} canAccept={tx.state.status !== "pending"} />
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <Label>Other open requests</Label>
+            <div className="mt-3 space-y-3">
+              {otherRequests.length === 0 && <p className="text-xs" style={{ color: "var(--subtle)" }}>None.</p>}
+              {otherRequests.map((r) => <RequestRow key={r.id} r={r} now={chainNow ?? 0} />)}
+            </div>
+          </Card>
+
+          <Card>
+            <Label>90-day parity forwards</Label>
+            <table className="w-full text-sm mt-3">
+              <thead>
+                <tr style={{ color: "var(--subtle)" }} className="text-xs">
+                  <th className="text-left py-1.5">Pair</th><th className="text-right">Spot</th><th className="text-right">r base</th><th className="text-right">r quote</th><th className="text-right">90D forward</th>
+                </tr>
+              </thead>
+              <tbody>
+                {PAIRS.map((p) => {
+                  const m = matrix?.[p.id];
+                  return (
+                    <tr key={p.id} className="cursor-pointer" style={{ borderTop: "1px solid var(--border)" }} onClick={() => { setPair(p); setTenor(90); }}>
+                      <td className="py-2 mono font-bold" style={{ color: "var(--ink)" }}>{p.id}</td>
+                      <td className="text-right mono" style={{ color: "var(--muted)" }}>{m ? formatPrice(m.spot, 2) : "—"}</td>
+                      <td className="text-right mono" style={{ color: "var(--muted)" }}>{m ? formatPct(m.rateBase) : "—"}</td>
+                      <td className="text-right mono" style={{ color: "var(--muted)" }}>{m ? formatPct(m.rateQuote) : "—"}</td>
+                      <td className="text-right mono font-semibold" style={{ color: "var(--ink)" }}>{m ? formatPrice(m.forward, 4) : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <a href={`${tx.explorer}/address/${d.parity}`} target="_blank" rel="noopener noreferrer" className="mt-3 inline-flex items-center gap-1 text-xs" style={{ color: "var(--subtle)" }}>
+              Parity contract {truncateAddress(d.parity)} <ExternalLink style={{ width: 10, height: 10 }} />
+            </a>
+          </Card>
+        </div>
       </div>
-      <div
-        className="display text-2xl font-bold tabular-nums"
-        style={{ color: "var(--ink)", letterSpacing: "-0.02em" }}
-      >
-        {value}
-      </div>
-      {sub && <div className="text-xs mt-0.5" style={{ color: "var(--subtle)" }}>{sub}</div>}
     </div>
   );
 }
 
-export default function DashboardPage() {
-  const { isConnected } = useAccount();
-  const [pair, setPair] = useState<Pair>("MXN/USD");
-  const [tenor, setTenor] = useState(90);
-
-  const [spot, setSpot] = useState<number | null>(null);
-  const [rateMXN, setRateMXN] = useState<number | null>(null);
-  const [rateTRY, setRateTRY] = useState<number | null>(null);
-  const [rateUSD, setRateUSD] = useState<number | null>(null);
-  const [forward, setForward] = useState<number | null>(null);
-  const [insurance, setInsurance] = useState<number | null>(null);
-  const [chainLoading, setChainLoading] = useState(true);
-  const [chainConnected, setChainConnected] = useState(false);
-  const [forwardMatrix, setForwardMatrix] = useState<Record<string, Record<number, number>>>({});
-
-  const fetchChainData = useCallback(async () => {
-    if (!CONTRACT_ADDRESS) { setChainLoading(false); return; }
-    setChainLoading(true);
-    try {
-      const [spotVal, mxnVal, tryVal, usdVal, insVal] = await Promise.all([
-        getSpot(), getRate("MXN"), getRate("TRY"), getRate("USD"), getInsuranceBalance(),
-      ]);
-      if (spotVal !== null) { setSpot(spotVal); setChainConnected(true); }
-      if (mxnVal !== null) setRateMXN(mxnVal);
-      if (tryVal !== null) setRateTRY(tryVal);
-      if (usdVal !== null) setRateUSD(usdVal);
-      if (insVal !== null) setInsurance(insVal);
-
-      if (spotVal && usdVal && mxnVal && tryVal) {
-        const matrix: Record<string, Record<number, number>> = {};
-        for (const p of PAIRS) {
-          matrix[p] = {};
-          const rQ = p === "MXN/USD" ? mxnVal : tryVal;
-          for (const t of TENORS) {
-            const fwd = computeForward(spotVal, usdVal, rQ, t);
-            if (fwd !== null) matrix[p][t] = fwd;
-          }
-        }
-        setForwardMatrix(matrix);
-      }
-    } catch (err) {
-      console.error("Chain fetch failed:", err);
-    }
-    setChainLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchChainData();
-    const interval = setInterval(fetchChainData, 30_000);
-    return () => clearInterval(interval);
-  }, [fetchChainData]);
-
-  useEffect(() => {
-    const sp = spot ?? 20.0;
-    const rB = rateUSD ?? 0.04;
-    const rQ = pair === "MXN/USD" ? (rateMXN ?? 0.10) : (rateTRY ?? 0.45);
-    setForward(computeForward(sp, rB, rQ, tenor));
-  }, [pair, tenor, spot, rateUSD, rateMXN, rateTRY]);
-
-  const spotDisplay = spot ?? 20.0;
-  const rateDisplay = { MXN: rateMXN ?? 0.10, TRY: rateTRY ?? 0.45, USD: rateUSD ?? 0.04 };
-  const lerpedSpot = useLerped(spotDisplay);
-  const lerpedInsurance = useLerped(insurance);
-
+function Row({ k, v }: { k: string; v: string }) {
   return (
-    <div className="space-y-6">
-
-      {/* ── Connection badge ──────────────────────────────────────────── */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-2">
-          <div
-            className="flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full"
-            style={{
-              background: chainConnected
-                ? "rgba(141,216,159,0.10)"
-                : chainLoading
-                ? "rgba(244,201,122,0.10)"
-                : "rgba(232,109,122,0.10)",
-              border: `1px solid ${chainConnected ? "rgba(141,216,159,0.25)" : chainLoading ? "rgba(244,201,122,0.25)" : "rgba(232,109,122,0.25)"}`,
-              color: chainConnected ? "var(--success)" : chainLoading ? "var(--warn)" : "var(--danger)",
-            }}
-          >
-            {chainLoading
-              ? <Loader2 style={{ width: 11, height: 11 }} className="animate-spin" />
-              : <Activity style={{ width: 11, height: 11 }} />}
-            {CONTRACT_ADDRESS
-              ? chainConnected
-                ? `Contract: ${CONTRACT_ADDRESS.slice(0, 8)}…${CONTRACT_ADDRESS.slice(-4)}`
-                : chainLoading
-                ? "Connecting to Arc RPC…"
-                : "Using fallback data"
-              : "Contract pending"}
-          </div>
-
-          {chainConnected && (
-            <a
-              href={`${ARC_TESTNET_EXPLORER}/address/${CONTRACT_ADDRESS}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs"
-              style={{ color: "var(--subtle)" }}
-            >
-              Explorer <ExternalLink style={{ width: 10, height: 10 }} />
-            </a>
-          )}
-        </div>
-
-        <button
-          onClick={fetchChainData}
-          disabled={chainLoading}
-          className="flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition-all disabled:opacity-40"
-          style={{
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            color: "var(--muted)",
-          }}
-        >
-          <RefreshCw style={{ width: 11, height: 11 }} className={chainLoading ? "animate-spin" : ""} />
-          Refresh
-        </button>
-      </div>
-
-      {/* ── Stats row ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard
-          label="MXN/USD Spot"
-          value={lerpedSpot.toFixed(4)}
-          sub={chainConnected ? "on-chain oracle" : "demo data"}
-          icon={Activity}
-          color="var(--accent)"
-          live={chainConnected}
-        />
-        <StatCard
-          label="Selected Fwd"
-          value={forward !== null ? forward.toFixed(4) : "—"}
-          sub={`${pair} · ${tenor}D`}
-          icon={TrendingUp}
-          color="var(--success)"
-          live={chainConnected}
-        />
-        <StatCard
-          label="Insurance Fund"
-          value={insurance !== null ? `$${(lerpedInsurance ?? 0).toFixed(2)}` : "$0.00"}
-          sub="USDC · on-chain"
-          icon={Shield}
-          color="var(--warn)"
-          live={chainConnected}
-        />
-        <StatCard
-          label="Open Requests"
-          value={String(MOCK_REQUESTS.length)}
-          sub="awaiting quotes"
-          icon={Clock}
-          color="var(--subtle)"
-        />
-      </div>
-
-      {/* ── Rate strip ────────────────────────────────────────────────── */}
-      <div
-        className="rounded-2xl px-5 py-3 flex items-center gap-6 flex-wrap"
-        style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
-      >
-        <span className="text-xs uppercase tracking-widest font-semibold" style={{ color: "var(--subtle)" }}>
-          Risk-free rates
-        </span>
-        {(["MXN", "TRY", "USD"] as const).map((ccy) => (
-          <div key={ccy} className="flex items-baseline gap-2">
-            <span className="text-xs font-medium" style={{ color: "var(--subtle)" }}>r({ccy})</span>
-            <span className="mono text-base font-bold" style={{ color: "var(--ink)" }}>
-              {(rateDisplay[ccy] * 100).toFixed(2)}
-              <span className="text-xs ml-0.5" style={{ color: "var(--subtle)" }}>%</span>
-            </span>
-            {chainConnected && (
-              <span className="text-xs" style={{ color: "var(--success)", opacity: 0.8 }}>on-chain</span>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* ── Main two-column layout ────────────────────────────────────── */}
-      <div className="grid lg:grid-cols-12 gap-5">
-        {/* Left column */}
-        <div className="lg:col-span-4 space-y-5">
-          <ForwardDisplay
-            pair={pair}
-            tenor={tenor}
-            chainForward={forward}
-            chainConnected={chainConnected}
-          />
-          <RequestForm
-            onPairChange={setPair}
-            onTenorChange={setTenor}
-            walletConnected={isConnected}
-          />
-        </div>
-
-        {/* Right column */}
-        <div className="lg:col-span-8 space-y-5">
-          <div className="flex items-center justify-between">
-            <h2 className="display font-semibold text-base" style={{ color: "var(--ink)" }}>
-              Open Requests
-            </h2>
-            <div className="flex items-center gap-1.5 text-xs" style={{ color: "var(--subtle)" }}>
-              <span className="live-dot w-1.5 h-1.5 rounded-full" style={{ background: "var(--success)" }} />
-              Live
-            </div>
-          </div>
-          <QuoteList requests={MOCK_REQUESTS} walletConnected={isConnected} />
-        </div>
-      </div>
-
-      {/* ── Forward Matrix ───────────────────────────────────────────── */}
-      <div
-        className="rounded-2xl p-5 overflow-hidden"
-        style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="display text-sm font-semibold uppercase tracking-widest" style={{ color: "var(--muted)" }}>
-            Forward Matrix
-          </h3>
-          {chainConnected && (
-            <span className="text-xs font-medium flex items-center gap-1.5" style={{ color: "var(--success)" }}>
-              <span className="live-dot w-1.5 h-1.5 rounded-full" style={{ background: "var(--success)" }} />
-              Computed on Arc
-            </span>
-          )}
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr>
-                <th
-                  className="text-left py-2 px-3 text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--subtle)" }}
-                >
-                  Pair
-                </th>
-                <th
-                  className="text-right py-2 px-3 text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--subtle)" }}
-                >
-                  Spot
-                </th>
-                {TENORS.map((t) => (
-                  <th
-                    key={t}
-                    className="text-right py-2 px-3 text-xs font-semibold uppercase tracking-widest"
-                    style={{ color: "var(--subtle)" }}
-                  >
-                    {t}D
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(["MXN/USD", "TRY/USD"] as const).map((p, ri) => (
-                <tr
-                  key={p}
-                  style={{ borderTop: ri > 0 ? "1px solid var(--border)" : undefined }}
-                >
-                  <td className="py-3.5 px-3">
-                    <span className="mono text-sm font-bold" style={{ color: "var(--ink)" }}>{p}</span>
-                  </td>
-                  <td className="py-3.5 px-3 text-right">
-                    <span className="mono text-sm" style={{ color: "var(--muted)" }}>
-                      {spotDisplay.toFixed(4)}
-                    </span>
-                  </td>
-                  {TENORS.map((t) => {
-                    const rQ = p === "MXN/USD" ? (rateMXN ?? 0.10) : (rateTRY ?? 0.45);
-                    const fwd = forwardMatrix[p]?.[t] ?? computeForward(spotDisplay, rateDisplay.USD, rQ, t);
-                    if (!fwd) return (
-                      <td key={t} className="py-3.5 px-3 text-right">
-                        <span className="mono text-sm" style={{ color: "var(--subtle)" }}>—</span>
-                      </td>
-                    );
-                    const premium = ((fwd - spotDisplay) / spotDisplay) * 100;
-                    const isSelected = pair === p && tenor === t;
-                    return (
-                      <td
-                        key={t}
-                        className="py-3.5 px-3 text-right cursor-pointer transition-all rounded-lg"
-                        style={isSelected ? { background: "rgba(172,198,233,0.10)" } : undefined}
-                        onClick={() => { setPair(p); setTenor(t); }}
-                      >
-                        <div className="mono text-sm font-medium" style={{ color: "var(--ink)" }}>
-                          {formatPrice(fwd, 4)}
-                        </div>
-                        <div
-                          className="mono text-xs"
-                          style={{ color: premium >= 0 ? "var(--success)" : "var(--danger)" }}
-                        >
-                          {premium >= 0 ? "+" : ""}{premium.toFixed(2)}%
-                        </div>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <p className="mt-3 text-xs text-center" style={{ color: "var(--subtle)", opacity: 0.7 }}>
-          Click a cell to select that pair · tenor
-        </p>
-      </div>
+    <div className="flex justify-between">
+      <span style={{ color: "var(--subtle)" }}>{k}</span>
+      <span className="mono font-semibold" style={{ color: "var(--ink)" }}>{v}</span>
     </div>
   );
 }

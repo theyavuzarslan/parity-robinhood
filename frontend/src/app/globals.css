@@ -4,7 +4,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Arc Dark tokens ──────────────────────────────────────────────────── */
+/* ── Dark tokens ──────────────────────────────────────────────────── */
 :root {
   --bg:             #0d1b2f;
   --bg-gradient:    linear-gradient(180deg, #0d1b2f 0%, #0d1b2f 58%, #122d45 100%);

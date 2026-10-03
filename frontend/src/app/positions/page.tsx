@@ -1,271 +1,108 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useAccount } from "wagmi";
-import { Filter, AlertTriangle, XCircle, CheckCircle2, BarChart3, Loader2, X } from "lucide-react";
-import PositionCard from "@/components/PositionCard";
-import WaterfallView from "@/components/WaterfallView";
-import { MOCK_POSITIONS, type MockPosition } from "@/lib/mock";
-import { getPosition } from "@/lib/contract";
-import { formatUSDC } from "@/lib/format";
+import { getAllPositions, getCurrentTime, type Position } from "@/lib/contract";
+import { useTx, usePoll } from "@/lib/hooks";
+import { formatPrice, formatUSD, formatCountdown, truncateAddress, toUsdg } from "@/lib/format";
+import { Card, Label, Button, NumberInput } from "@/components/ui";
+import TxStatus from "@/components/TxStatus";
+import MarginBar from "@/components/MarginBar";
 
-type FilterType = "all" | "active" | "called" | "liquidated" | "matured";
+export default function PositionsPage() {
+  const { address } = useAccount();
+  const { data: positions, refresh } = usePoll(() => getAllPositions(), 10_000, []);
+  const { data: chainNow, refresh: refreshNow } = usePoll(() => getCurrentTime(), 10_000, []);
+  const tx = useTx(useCallback(() => { refresh(); refreshNow(); }, [refresh, refreshNow]));
+  const [mineOnly, setMineOnly] = useState(false);
 
-/* ── Stat chip ──────────────────────────────────────────────────────────── */
-function StatChip({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: number;
-  color: string;
-}) {
+  const list = (positions ?? []).filter(
+    (p) => !mineOnly || (address && [p.hedger, p.maker].some((a) => a.toLowerCase() === address.toLowerCase()))
+  );
+
   return (
-    <div
-      className="rounded-2xl p-4 flex flex-col gap-1"
-      style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
-    >
-      <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--subtle)" }}>
-        {label}
-      </span>
-      <span className="display text-2xl font-bold tabular-nums" style={{ color, letterSpacing: "-0.02em" }}>
-        {value}
-      </span>
+    <div className="space-y-5">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="display text-2xl font-bold" style={{ color: "var(--ink)" }}>Positions</h1>
+          <p className="text-sm mt-1" style={{ color: "var(--muted)" }}>
+            Anyone can mark or liquidate. The first breach closes 30% and keeps the rest collateralized; settlement pays the difference in USDG at maturity.
+          </p>
+        </div>
+        <Button tone="ghost" onClick={() => setMineOnly(!mineOnly)}>{mineOnly ? "Show all" : "Show mine"}</Button>
+      </div>
+      <TxStatus state={tx.state} explorer={tx.explorer} />
+      {list.length === 0 && <Card><p className="text-xs" style={{ color: "var(--subtle)" }}>No positions yet.</p></Card>}
+      <div className="grid gap-4">
+        {list.map((p) => (
+          <PositionCard key={p.id} p={p} now={chainNow ?? 0} me={address} tx={tx} />
+        ))}
+      </div>
     </div>
   );
 }
 
-export default function PositionsPage() {
-  const { address: walletAddress } = useAccount();
-  const [filter, setFilter] = useState<FilterType>("all");
-  const [selectedPosition, setSelectedPosition] = useState<number | null>(null);
-  const [now, setNow] = useState(0);
-  const [chainPositions, setChainPositions] = useState<MockPosition[]>([]);
-  const [chainLoading, setChainLoading] = useState(true);
-
-  useEffect(() => {
-    setNow(Math.floor(Date.now() / 1000));
-    const interval = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const loadChainPositions = useCallback(async () => {
-    setChainLoading(true);
-    const loaded: MockPosition[] = [];
-    for (let i = 0; i < 10; i++) {
-      try {
-        const pos = await getPosition(i);
-        if (pos) {
-          loaded.push({
-            id: i,
-            hedger: String(pos.hedger || "").slice(0, 8) + "…" + String(pos.hedger || "").slice(-4),
-            maker: String(pos.maker || "").slice(0, 8) + "…" + String(pos.maker || "").slice(-4),
-            pair: `${pos.pair_quote || "MXN"}/${pos.pair_base || "USD"}`,
-            direction: pos.direction === "SellBase" || (pos.direction as Record<string, unknown>)?.SellBase !== undefined ? "sell" : "buy",
-            notional: Number(pos.notional || 0) / 1e7,
-            locked_forward: Number(pos.locked_forward || 0) / 1e7,
-            maturity: Number(pos.maturity_time || 0),
-            initial_margin: Math.max(Number(pos.hedger_margin || 0), Number(pos.maker_margin || 0)) / 1e7 || Number(pos.notional || 0) / 1e7 * 0.05,
-            hedger_margin: Number(pos.hedger_margin || 0) / 1e7,
-            maker_margin: Number(pos.maker_margin || 0) / 1e7,
-            hedger_state: parseState(pos.hedger_state),
-            maker_state: parseState(pos.maker_state),
-            current_forward: Number(pos.locked_forward || 0) / 1e7,
-            settled: isSettled(pos),
-          });
-        }
-      } catch { break; }
-    }
-    setChainPositions(loaded);
-    setChainLoading(false);
-  }, []);
-
-  useEffect(() => { loadChainPositions(); }, [loadChainPositions]);
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function isSettled(pos: any): boolean {
-    const status = pos.status;
-    if (typeof status === "string" && status.toLowerCase().includes("settled")) return true;
-    if (typeof status === "object" && status && ("Settled" in status || "settled" in status)) return true;
-    if (Number(pos.hedger_margin) === 0 && Number(pos.maker_margin) === 0) return true;
-    return false;
-  }
-
-  function parseState(s: unknown): "Safe" | "Called" | "Liquidated" {
-    if (!s) return "Safe";
-    if (typeof s === "string") return s as "Safe" | "Called" | "Liquidated";
-    if (typeof s === "object") {
-      if ("Called" in (s as object)) return "Called";
-      if ("Liquidated" in (s as object)) return "Liquidated";
-    }
-    return "Safe";
-  }
-
-  const allPositions = useMemo(() => [
-    ...chainPositions.map(p => ({ ...p, source: "chain" as const })),
-    ...MOCK_POSITIONS.map(p => ({ ...p, source: "demo" as const })),
-  ], [chainPositions]);
-
-  const positions = useMemo(() => {
-    if (now === 0) return [];
-    return allPositions.filter((p) => {
-      switch (filter) {
-        case "active":   return !p.settled && p.maturity > now && p.hedger_state === "Safe" && p.maker_state === "Safe";
-        case "called":   return p.hedger_state === "Called" || p.maker_state === "Called";
-        case "liquidated": return p.hedger_state === "Liquidated" || p.maker_state === "Liquidated";
-        case "matured":  return p.maturity <= now && !p.settled;
-        default:         return true;
-      }
-    });
-  }, [filter, now, allPositions]);
-
-  const stats = useMemo(() => {
-    if (now === 0) return { active: 0, called: 0, liquidated: 0, matured: 0, totalNotional: 0 };
-    return {
-      active:        allPositions.filter(p => !p.settled && p.maturity > now && p.hedger_state === "Safe" && p.maker_state === "Safe").length,
-      called:        allPositions.filter(p => p.hedger_state === "Called" || p.maker_state === "Called").length,
-      liquidated:    allPositions.filter(p => p.hedger_state === "Liquidated" || p.maker_state === "Liquidated").length,
-      matured:       allPositions.filter(p => now > 0 && p.maturity <= now && !p.settled).length,
-      totalNotional: allPositions.filter(p => !p.settled).reduce((sum, p) => sum + p.notional, 0),
-    };
-  }, [now, allPositions]);
-
-  const selectedWaterfall = selectedPosition !== null
-    ? { loserMargin: 5000, insuranceUsed: 200, winnerHaircut: 0, hedgerPayout: 6485, makerPayout: 3515 }
-    : null;
-
-  const FILTERS: { key: FilterType; label: string; count: number; icon: React.ElementType }[] = [
-    { key: "all",        label: "All",       count: allPositions.length, icon: BarChart3 },
-    { key: "active",     label: "Active",    count: stats.active,        icon: CheckCircle2 },
-    { key: "called",     label: "Called",    count: stats.called,        icon: AlertTriangle },
-    { key: "liquidated", label: "Liquidated",count: stats.liquidated,    icon: XCircle },
-    { key: "matured",    label: "Matured",   count: stats.matured,       icon: CheckCircle2 },
-  ];
+function PositionCard({ p, now, me, tx }: { p: Position; now: number; me?: string; tx: ReturnType<typeof useTx> }) {
+  const [topUp, setTopUp] = useState("");
+  const value = p.markValue ?? p.lastMarkValue;
+  const hedgerLoss = Math.max(-value, 0);
+  const makerLoss = Math.max(value, 0);
+  const mature = now >= p.maturityTime;
+  const active = p.status === "Active";
+  const isParty = me && [p.hedger, p.maker].some((a) => a.toLowerCase() === me.toLowerCase());
+  const breached = hedgerLoss >= p.liqThreshold || makerLoss >= p.liqThreshold;
+  const busy = tx.state.status === "pending";
+  const call = (label: string, fn: string, args: unknown[], approve?: bigint) =>
+    tx.parity && tx.send(label, { ...tx.parity, functionName: fn, args }, approve);
 
   return (
-    <div className="space-y-5">
-
-      {/* ── Header ────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between">
-        <h1 className="display text-2xl font-bold" style={{ color: "var(--ink)", letterSpacing: "-0.02em" }}>
-          Positions
-        </h1>
-        <div className="flex items-center gap-3 text-sm">
-          {chainLoading ? (
-            <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--warn)" }}>
-              <Loader2 style={{ width: 12, height: 12 }} className="animate-spin" />
-              Loading chain…
-            </span>
-          ) : chainPositions.length > 0 ? (
-            <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--success)" }}>
-              <span className="live-dot w-1.5 h-1.5 rounded-full" style={{ background: "var(--success)" }} />
-              {chainPositions.length} on-chain
-            </span>
-          ) : null}
-          <span className="text-xs" style={{ color: "var(--subtle)" }}>
-            Notional:{" "}
-            <span className="mono font-semibold" style={{ color: "var(--muted)" }}>
-              {formatUSDC(stats.totalNotional)}
-            </span>
-          </span>
-        </div>
+    <Card style={{ borderColor: !active ? "var(--border)" : breached ? "rgba(232,109,122,0.45)" : hedgerLoss >= p.callThreshold || makerLoss >= p.callThreshold ? "rgba(244,201,122,0.40)" : "var(--border)", opacity: active ? 1 : 0.6 }}>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="mono text-sm font-bold" style={{ color: "var(--ink)" }}>
+          #{p.id} · hedger {p.direction === "SellBase" ? "sold" : "bought"} {p.notional.toLocaleString()} {p.base}/{p.quote} forward
+        </span>
+        <span className="text-xs mono" style={{ color: active ? (mature ? "var(--warn)" : "var(--subtle)") : "var(--subtle)" }}>
+          {active ? (mature ? "Matured, ready to settle" : `matures in ${formatCountdown(p.maturityTime - now)}`) : p.status}
+        </span>
       </div>
-
-      {/* ── Stat chips ────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatChip label="Active"       value={stats.active}     color="var(--success)" />
-        <StatChip label="Margin Called"value={stats.called}     color="var(--warn)" />
-        <StatChip label="Liquidated"   value={stats.liquidated} color="var(--danger)" />
-        <StatChip label="Ready to Settle" value={stats.matured} color="var(--accent)" />
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 text-xs">
+        <Metric k="Locked forward" v={formatPrice(p.lockedForward, 4)} />
+        <Metric k="Current forward" v={p.currentForward !== null ? formatPrice(p.currentForward, 4) : "—"} />
+        <Metric k="Spot" v={p.spot !== null ? formatPrice(p.spot, 2) : "—"} />
+        <Metric k="Hedger P&L" v={`${value >= 0 ? "+" : ""}${formatUSD(value)}`} color={value >= 0 ? "var(--success)" : "var(--danger)"} />
       </div>
-
-      {/* ── Filter chips ──────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <Filter style={{ width: 14, height: 14, color: "var(--subtle)" }} />
-        {FILTERS.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => setFilter(f.key)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all"
-            style={{
-              background: filter === f.key ? "var(--surface-strong)" : "transparent",
-              border: `1px solid ${filter === f.key ? "var(--border-strong)" : "transparent"}`,
-              color: filter === f.key ? "var(--ink)" : "var(--subtle)",
-            }}
-          >
-            <f.icon style={{ width: 11, height: 11 }} />
-            {f.label}
-            <span className="mono" style={{ opacity: 0.6 }}>{f.count}</span>
-          </button>
-        ))}
+      <div className="text-xs mono mt-2" style={{ color: "var(--subtle)" }}>
+        H {truncateAddress(p.hedger)} · M {truncateAddress(p.maker)}
+        {(p.hedgerPartialDone || p.makerPartialDone) && " · partially liquidated"}
       </div>
-
-      {/* ── Position list ─────────────────────────────────────────────── */}
-      <div className="grid gap-4">
-        {positions.length === 0 ? (
-          <div
-            className="rounded-2xl p-12 text-center"
-            style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
-          >
-            <p className="text-sm" style={{ color: "var(--subtle)" }}>
-              No positions match this filter
-            </p>
+      {active && (
+        <>
+          <div className="grid sm:grid-cols-2 gap-4 mt-4">
+            <MarginBar label="Hedger" margin={p.hedgerMargin} loss={hedgerLoss} callAt={p.callThreshold} liqAt={p.liqThreshold} state={p.hedgerState} />
+            <MarginBar label="Maker" margin={p.makerMargin} loss={makerLoss} callAt={p.callThreshold} liqAt={p.liqThreshold} state={p.makerState} />
           </div>
-        ) : (
-          positions.map((pos) => (
-            <div key={`${pos.source}-${pos.id}`}>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span
-                  className="text-xs font-semibold px-2 py-0.5 rounded-full"
-                  style={pos.source === "chain" ? {
-                    background: "rgba(141,216,159,0.12)",
-                    border: "1px solid rgba(141,216,159,0.25)",
-                    color: "var(--success)",
-                  } : {
-                    background: "var(--surface-muted)",
-                    border: "1px solid var(--border)",
-                    color: "var(--subtle)",
-                  }}
-                >
-                  {pos.source === "chain" ? "On-Chain" : "Demo Data"}
-                </span>
-                {pos.source === "demo" && (
-                  <span className="text-xs" style={{ color: "var(--subtle)", opacity: 0.5 }}>
-                    Buttons simulate only
-                  </span>
-                )}
+          <div className="flex flex-wrap gap-2 mt-4 items-center">
+            <Button tone="ghost" disabled={busy} onClick={() => call("Mark to market", "markPosition", [BigInt(p.id)])}>Mark to market</Button>
+            {breached && <Button tone="danger" disabled={busy} onClick={() => call("Liquidate", "liquidate", [BigInt(p.id)])}>Liquidate</Button>}
+            {mature && <Button tone="success" disabled={busy} onClick={() => call("Settle", "settle", [BigInt(p.id)])}>Settle</Button>}
+            {isParty && (
+              <div className="flex gap-2 items-center">
+                <div className="w-36"><NumberInput value={topUp} onChange={setTopUp} placeholder="Top up" suffix="USDG" /></div>
+                <Button tone="ghost" disabled={busy || !(parseFloat(topUp) > 0)} onClick={() => call("Top up margin", "topUpMargin", [BigInt(p.id), toUsdg(parseFloat(topUp))], toUsdg(parseFloat(topUp)))}>Top up</Button>
               </div>
-              <div onClick={() => setSelectedPosition(pos.id)} className="cursor-pointer">
-                <PositionCard
-                  position={pos}
-                  userAddress={walletAddress}
-                  showActions={pos.source === "chain" && !pos.settled}
-                />
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* ── Waterfall panel ───────────────────────────────────────────── */}
-      {selectedWaterfall && selectedPosition !== null && (
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="display text-base font-semibold" style={{ color: "var(--ink)" }}>
-              Settlement Waterfall — Position #{selectedPosition}
-            </h2>
-            <button
-              onClick={() => setSelectedPosition(null)}
-              className="flex items-center gap-1 text-xs font-medium transition-all hover:opacity-70"
-              style={{ color: "var(--subtle)" }}
-            >
-              <X style={{ width: 13, height: 13 }} /> Close
-            </button>
+            )}
           </div>
-          <WaterfallView {...selectedWaterfall} />
-        </div>
+        </>
       )}
+    </Card>
+  );
+}
+
+function Metric({ k, v, color }: { k: string; v: string; color?: string }) {
+  return (
+    <div>
+      <Label>{k}</Label>
+      <div className="mono text-sm font-semibold mt-0.5" style={{ color: color ?? "var(--ink)" }}>{v}</div>
     </div>
   );
 }

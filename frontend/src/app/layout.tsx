@@ -41,7 +41,7 @@ function ParityLogo() {
           className="text-xs font-medium ml-1.5 hidden sm:inline"
           style={{ color: "var(--subtle)" }}
         >
-          FX Forwards
+          Forwards
         </span>
       </div>
     </Link>
@@ -54,8 +54,8 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
-        <title>Parity — FX Forward Market on Arc</title>
-        <meta name="description" content="Two-sided FX forward market on Arc blockchain" />
+        <title>Parity · Forwards on Robinhood Stock Tokens</title>
+        <meta name="description" content="Parity-priced, RFQ, margined forwards on Robinhood Chain" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body>
@@ -102,7 +102,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
                 {/* Right: chain badge + wallet */}
                 <div className="flex items-center gap-3">
                   <a
-                    href="https://explorer.testnet.arc.io"
+                    href="https://explorer.testnet.chain.robinhood.com"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="hidden sm:flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full"
@@ -113,7 +113,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
                     }}
                   >
                     <span className="live-dot w-1.5 h-1.5 rounded-full" style={{ background: "var(--success)" }} />
-                    Arc Testnet
+                    Robinhood Chain Testnet
                     <ExternalLink style={{ width: 10, height: 10, opacity: 0.6 }} />
                   </a>
                   <WalletConnect />
@@ -152,7 +152,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           <footer style={{ borderTop: "1px solid var(--border)", marginTop: 48 }}>
             <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 flex items-center justify-between">
               <span className="text-xs" style={{ color: "var(--subtle)" }}>
-                Parity Protocol · FX Forwards on Arc
+                Parity · Forwards on Robinhood Chain
               </span>
               <span className="mono text-xs" style={{ color: "var(--subtle)", opacity: 0.6 }}>
                 Covered Interest Rate Parity

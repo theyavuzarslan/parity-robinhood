@@ -122,9 +122,23 @@ for s in 1 2 3 4 5 6; do scripts/demo.sh $s; done
 scripts/verify-testnet.sh
 ```
 
+## Frontend
+
+`frontend/` is a Next.js app (wagmi + ConnectKit) wired to the testnet deployment:
+
+- **Market**: live parity forwards for every pair, post a request, accept a quote, mint testnet USDG.
+- **Maker**: quote a spread over parity (margin reserved at quote time), cancel.
+- **Positions**: live mark and P&L per side against the call and liquidation thresholds; mark, top up, liquidate, settle.
+- **Admin** (owner only, demo mode): push price prints, set rates, move the contract clock to day 30 or maturity.
+
+```bash
+cd frontend && npm install && npm run build && npm start   # http://localhost:3000
+```
+
+It reads `src/deployments/deployments.json`, which `scripts/sync-frontend.sh` writes from `deployments/`.
+
 ## What is not done
 
-- **Frontend.** `frontend/` is a Next.js app carried over from the Arc port. Its chain config, ABIs and read layer are rebuilt for Robinhood Chain; the pages are not yet wired to them, so the demo runs through the scripts and the explorer links above.
 - **Physical settlement.** Delivering the Stock Token itself against USDG at maturity is a natural next step, since the tokens are plain ERC-20s. Today settlement is cash only.
 - **Mainnet.** Not deployed. Stock Tokens are tokenized debt securities restricted for US persons and some other jurisdictions; a mainnet version needs an eligibility policy for who can take the long side, which the allowlist already supports. Not legal advice.
 - **No audit.**
