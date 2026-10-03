@@ -1,10 +1,15 @@
-target/
+# Foundry
+out/
+cache/
+broadcast/*/31337/
+deployments/31337.json
+# Node / Next
 node_modules/
 .next/
-.env
-.env.local
-*.wasm
-.soroban/
-.stellar/
 frontend/.next/
 frontend/node_modules/
+*.tsbuildinfo
+# Secrets
+.env
+.env.local
+frontend/.env.local

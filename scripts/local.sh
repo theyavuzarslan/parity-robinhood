@@ -9,7 +9,7 @@ ANVIL=$!
 trap 'kill $ANVIL' EXIT
 sleep 2
 forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --private-key "$PRIVATE_KEY" -q
-for s in 1 2 3 4 5; do
+for s in 1 2 3 4 5 6; do
   forge script script/Demo.s.sol --sig "step(uint8)" $s --rpc-url http://127.0.0.1:8545 --broadcast --private-key "$PRIVATE_KEY" -q 2>&1 | grep -E "^  [a-z]" || true
 done
 echo "local run complete"

@@ -13,7 +13,9 @@ import {MockERC20} from "../contracts/mocks/MockERC20.sol";
 ///   2  day 30, spot 310: hedger is margin called (loss 9,067 > 7,500)
 ///   3  spot 315 (two prints): breach; partial liquidation closes 30%, realizes 4,230 + 900 penalty
 ///   4  gap to 335: full liquidation through the waterfall (margin, insurance fund, haircut)
-///   5  open a fresh position, jump to day 90 at 310, settle in cash
+///   5  open a fresh position at 303.00
+///   6  jump to that position's maturity at spot 310 and settle in cash (separate run, so the
+///      clock is read from the mined position rather than from the local simulation)
 contract Demo is Script {
     int256 constant D = 1e7;
     bytes32 constant TSLA = "TSLA";
@@ -31,7 +33,13 @@ contract Demo is Script {
         bytes32 pid = parity.pairId(TSLA, USD);
         uint256 pk = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(pk);
-        if (n == 1 || n == 5) {
+        if (n == 6) {
+            uint256 last = parity.nextPositionId() - 1;
+            parity.setDemoTime(parity.getPosition(last).maturityTime);
+            prices.setSpot(pid, 310 * D);
+            parity.settle(last);
+            console2.log("settled: hedger pays 7,000, both margins returned net");
+        } else if (n == 1 || n == 5) {
             parity.setDemoTime(0);
             prices.setSpot(pid, 300 * D);
             usdg.approve(address(parity), type(uint256).max);
@@ -39,12 +47,6 @@ contract Demo is Script {
             uint256 q = parity.submitQuote(req, 0, 0);
             uint256 pos = parity.acceptQuote(req, q);
             console2.log("position", pos, "locked forward", uint256(parity.getPosition(pos).lockedForward));
-            if (n == 5) {
-                parity.setDemoTime(parity.getPosition(pos).maturityTime);
-                prices.setSpot(pid, 310 * D);
-                parity.settle(pos);
-                console2.log("settled: hedger pays 7,000, both margins returned net");
-            }
         } else {
             uint256 pos = parity.nextPositionId() - 1;
             if (n == 2) {

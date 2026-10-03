@@ -1,1 +1,0 @@
-{"id":"b920a84ae7f51757","source_id_to_path":{"0":"contracts/interfaces/AggregatorV3Interface.sol","1":"contracts/interfaces/IPriceSource.sol","2":"contracts/interfaces/IStockToken.sol","3":"contracts/oracles/ChainlinkPriceSource.sol","4":"lib/openzeppelin-contracts/contracts/access/Ownable.sol","5":"lib/openzeppelin-contracts/contracts/utils/Context.sol"},"language":"Solidity"}
